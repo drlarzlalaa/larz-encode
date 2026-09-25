@@ -6,7 +6,7 @@ Base64, Base64url, Base32, hex and URL (percent) encoding and decoding, in [Larz
 $ larzscript encode.lz encode base64 "Hello, World!"
 SGVsbG8sIFdvcmxkIQ==
 $ larzscript encode.lz encode base32 "Hello, World!"
-JBSWY3DPFLW7TMMQQQ======
+JBSWY3DPFQQFO33SNRSCC===
 $ larzscript encode.lz encode url "a b&c=d/é"
 a%20b%26c%3Dd%2F%C3%A9
 $ larzscript encode.lz decode base64url "c3ViamVjdHM_X2Q9MT4-"
