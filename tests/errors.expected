@@ -1,0 +1,17 @@
+error: usage: encode|decode FORMAT TEXT (formats: base64 base64url base32 hex url)
+error: unknown format 'rot13'; use base64, base64url, base32, hex or url
+error: the length must be a multiple of 4, got 3
+error: '!' is not in the alphabet (position 3)
+error: padding '=' is only allowed at the end, at most twice
+error: the last group has nonzero padding bits
+error: the length must be a multiple of 4, got 9
+error: '+' is not in the alphabet (position 3)
+error: 'm' is not in the alphabet (position 1)
+error: the last group has nonzero padding bits
+error: a hex string needs an even number of digits, got 1
+error: 'g' is not a hex digit (position 2)
+error: a '%' must be followed by two hex digits (position 1)
+error: a '%' must be followed by two hex digits (position 1)
+error: cannot read '/no/such/file'
+error: cannot read '/no/such/file'
+error: at most 30000 bytes are supported, got 30001

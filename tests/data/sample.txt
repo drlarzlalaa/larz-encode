@@ -1,0 +1,2 @@
+Sample text
+with two lines, an é and a tab	here.

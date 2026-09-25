@@ -1,0 +1,13 @@
+#!/bin/sh
+$LZ encode base64 "Hello, World!"
+$LZ encode base64url "subjects?_d=1>>"
+$LZ encode base64 "subjects?_d=1>>"
+$LZ encode base32 "Hello, World!"
+$LZ encode hex "Hello, World!"
+$LZ encode hex "é"
+$LZ encode url "a b&c=d/é?x=1+2"
+$LZ encode url "AZaz09-_.~"
+$LZ decode base64 "SGVsbG8sIFdvcmxkIQ=="
+$LZ decode base64url "c3ViamVjdHM_X2Q9MT4-"
+$LZ decode hex "48656C6c6f"
+$LZ decode url "a%20b%26c%3Dd%2F%C3%A9"

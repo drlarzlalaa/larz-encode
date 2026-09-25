@@ -1,0 +1,358 @@
+# larz-encode - Base64, Base64url, Base32, hex and URL (percent) encoding and
+# decoding, written entirely in Larzscript.
+#
+#   larzscript encode.lz encode base64 "Hello, World!"
+#   larzscript encode.lz decode base64 "SGVsbG8sIFdvcmxkIQ=="
+#   larzscript encode.lz encode hex --file=notes.txt
+#   larzscript encode.lz encode url "a b&c=d/é"
+#   larzscript encode.lz batch tests/inputs.txt
+#
+# Text is handled as bytes (UTF-8), so "é" is the two bytes 195 169, and a file
+# may hold any bytes. The formats:
+#
+#   base64     RFC 4648 section 4: A-Z a-z 0-9 + /, padded with =
+#   base64url  RFC 4648 section 5: - and _ instead of + and /, padded with =
+#   base32     RFC 4648 section 6: A-Z 2-7, padded with =
+#   hex        two lowercase hex digits per byte (decoding accepts either case)
+#   url        percent-encoding: A-Z a-z 0-9 - _ . ~ stay, every other byte
+#              becomes %XX (uppercase); a space is %20, never +
+#
+# Decoding is strict, as RFC 4648 intends: characters outside the alphabet,
+# misplaced or missing padding and impossible lengths are errors, not silently
+# skipped, and so is whitespace. Encoding and decoding are checked against
+# Python's base64, binascii and urllib in tools/reference.py.
+#
+# The encoders work on 3-byte (base64), 5-byte (base32) groups using only
+# division and remainder, since Larzscript has no bit operators.
+
+import "cli" as cli
+import "args" as argmod
+
+fn fail(msg) {
+  if CATCH[0] { throw msg }
+  print("error: " + msg)
+  exit(2)
+}
+
+# In a batch a bad line is reported and the run goes on, so fail() throws instead of exiting.
+let CATCH = [false]
+
+let MAX_BYTES = 30000
+let B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+let B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+let B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+let HEXD = "0123456789abcdef"
+let UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+
+fn q(s) { return "'" + s.replace("'", "'\\''") + "'" }
+
+fn bytes_of_text(text) {
+  let out = []
+  let i = 0
+  while i < len(text) { out.push(ord(text[i])); i = i + 1 }
+  return out
+}
+
+fn bytes_of_file(path) {
+  let out = capture("od -An -v -tu1 " + q(path) + " 2>/dev/null")
+  if len(out) == 0 and not file_exists(path) { fail("cannot read '" + path + "'") }
+  let bytes = []
+  for w in out.replace("\n", " ").split(" ") {
+    let t = w.strip()
+    if len(t) > 0 { bytes.push(int(t)) }
+  }
+  return bytes
+}
+
+# The text form of bytes for display: printable ASCII as is, anything else as \xNN.
+fn text_of_bytes(bytes) {
+  let s = ""
+  for b in bytes { s = s + chr(b) }
+  return s
+}
+
+fn index_of(alphabet, ch) {
+  let i = 0
+  while i < len(alphabet) { if alphabet[i] == ch { return i }; i = i + 1 }
+  return -1
+}
+
+# --- base64 / base64url ----------------------------------------------------
+
+fn b64_encode(bytes, alphabet) {
+  let out = ""
+  let i = 0
+  let n = len(bytes)
+  while i < n {
+    let b0 = bytes[i]
+    let b1 = i + 1 < n ? bytes[i + 1] : 0
+    let b2 = i + 2 < n ? bytes[i + 2] : 0
+    let v = (b0 * 256 + b1) * 256 + b2
+    out = out + alphabet[floor(v / 262144)] + alphabet[floor(v / 4096) % 64]
+    out = out + (i + 1 < n ? alphabet[floor(v / 64) % 64] : "=")
+    out = out + (i + 2 < n ? alphabet[v % 64] : "=")
+    i = i + 3
+  }
+  return out
+}
+
+fn b64_decode(text, alphabet) {
+  let n = len(text)
+  if n % 4 != 0 { fail("the length must be a multiple of 4, got " + str(n)) }
+  let pad = 0
+  if n > 0 and text[n - 1] == "=" {
+    pad = 1
+    if n > 1 and text[n - 2] == "=" { pad = 2 }
+  }
+  let out = []
+  let i = 0
+  while i < n {
+    let v = 0
+    let j = 0
+    let real = 4
+    while j < 4 {
+      let ch = text[i + j]
+      let d = 0
+      if ch == "=" {
+        if i + 4 < n or j < 4 - pad { fail("padding '=' is only allowed at the end, at most twice") }
+        real = real - 1
+      } else {
+        d = index_of(alphabet, ch)
+        if d < 0 { fail("'" + ch + "' is not in the alphabet (position " + str(i + j + 1) + ")") }
+      }
+      v = v * 64 + d
+      j = j + 1
+    }
+    if real == 2 and v % 65536 != 0 { fail("the last group has nonzero padding bits") }
+    if real == 3 and v % 256 != 0 { fail("the last group has nonzero padding bits") }
+    out.push(floor(v / 65536))
+    if real >= 3 { out.push(floor(v / 256) % 256) }
+    if real == 4 { out.push(v % 256) }
+    i = i + 4
+  }
+  return out
+}
+
+# --- base32 ------------------------------------------------------------------
+
+fn b32_encode(bytes) {
+  let out = ""
+  let i = 0
+  let n = len(bytes)
+  while i < n {
+    let group = []
+    let k = 0
+    while k < 5 { group.push(i + k < n ? bytes[i + k] : 0); k = k + 1 }
+    let have = n - i < 5 ? n - i : 5
+    let chars = have == 1 ? 2 : have == 2 ? 4 : have == 3 ? 5 : have == 4 ? 7 : 8
+    # the 40 bits as two 20-bit halves, each cut into four 5-bit digits
+    let hi = (group[0] * 256 + group[1]) * 16 + floor(group[2] / 16)          # top 20 bits
+    let lo = (group[2] % 16) * 65536 + group[3] * 256 + group[4]              # low 20 bits
+    let digits = []
+    digits.push(floor(hi / 32768) % 32)
+    digits.push(floor(hi / 1024) % 32)
+    digits.push(floor(hi / 32) % 32)
+    digits.push(hi % 32)
+    digits.push(floor(lo / 32768) % 32)
+    digits.push(floor(lo / 1024) % 32)
+    digits.push(floor(lo / 32) % 32)
+    digits.push(lo % 32)
+    let j = 0
+    while j < 8 { out = out + (j < chars ? B32[digits[j]] : "="); j = j + 1 }
+    i = i + 5
+  }
+  return out
+}
+
+fn b32_decode(text) {
+  let n = len(text)
+  if n % 8 != 0 { fail("the length must be a multiple of 8, got " + str(n)) }
+  let out = []
+  let i = 0
+  while i < n {
+    let digits = []
+    let pad = 0
+    let j = 0
+    while j < 8 {
+      let ch = text[i + j]
+      if ch == "=" {
+        if i + 8 < n { fail("padding '=' is only allowed in the last group") }
+        pad = pad + 1
+        digits.push(0)
+      } else {
+        if pad > 0 { fail("padding '=' must be at the end of the group") }
+        let d = index_of(B32, ch)
+        if d < 0 { fail("'" + ch + "' is not in the alphabet (position " + str(i + j + 1) + ")") }
+        digits.push(d)
+      }
+      j = j + 1
+    }
+    let bytes_here = pad == 0 ? 5 : pad == 1 ? 4 : pad == 3 ? 3 : pad == 4 ? 2 : pad == 6 ? 1 : -1
+    if bytes_here < 0 { fail("a group cannot have " + str(pad) + " padding characters") }
+    let hi = ((digits[0] * 32 + digits[1]) * 32 + digits[2]) * 32 + digits[3]
+    let lo = ((digits[4] * 32 + digits[5]) * 32 + digits[6]) * 32 + digits[7]
+    let b = []
+    b.push(floor(hi / 4096))
+    b.push(floor(hi / 16) % 256)
+    b.push((hi % 16) * 16 + floor(lo / 65536))
+    b.push(floor(lo / 256) % 256)
+    b.push(lo % 256)
+    # the bits of the last data character that do not belong to a byte must be zero
+    let dropped = 40 - bytes_here * 8
+    let lowbits = 1
+    let e = 0
+    while e < dropped { lowbits = lowbits * 2; e = e + 1 }
+    if pad > 0 and (hi * 1048576 + lo) % lowbits != 0 { fail("the last group has nonzero padding bits") }
+    let k = 0
+    while k < bytes_here { out.push(b[k]); k = k + 1 }
+    i = i + 8
+  }
+  return out
+}
+
+# --- hex and url ---------------------------------------------------------------
+
+fn hex_encode(bytes) {
+  let out = ""
+  for b in bytes { out = out + HEXD[floor(b / 16)] + HEXD[b % 16] }
+  return out
+}
+
+fn hex_value(ch) {
+  let c = ord(ch)
+  if c >= 48 and c <= 57 { return c - 48 }
+  if c >= 97 and c <= 102 { return c - 87 }
+  if c >= 65 and c <= 70 { return c - 55 }
+  return -1
+}
+
+fn hex_decode(text) {
+  if len(text) % 2 != 0 { fail("a hex string needs an even number of digits, got " + str(len(text))) }
+  let out = []
+  let i = 0
+  while i < len(text) {
+    let hi = hex_value(text[i])
+    let lo = hex_value(text[i + 1])
+    if hi < 0 or lo < 0 { fail("'" + (hi < 0 ? text[i] : text[i + 1]) + "' is not a hex digit (position " + str(hi < 0 ? i + 1 : i + 2) + ")") }
+    out.push(hi * 16 + lo)
+    i = i + 2
+  }
+  return out
+}
+
+fn url_encode(bytes) {
+  let out = ""
+  for b in bytes {
+    let ch = chr(b)
+    if b < 128 and index_of(UNRESERVED, ch) >= 0 { out = out + ch }
+    else { out = out + "%" + upper_hex(floor(b / 16)) + upper_hex(b % 16) }
+  }
+  return out
+}
+
+fn upper_hex(d) { return "0123456789ABCDEF"[d] }
+
+fn url_decode(text) {
+  let out = []
+  let i = 0
+  while i < len(text) {
+    let ch = text[i]
+    if ch == "%" {
+      if i + 3 > len(text) { fail("a '%' must be followed by two hex digits (position " + str(i + 1) + ")") }
+      let hi = hex_value(text[i + 1])
+      let lo = hex_value(text[i + 2])
+      if hi < 0 or lo < 0 { fail("a '%' must be followed by two hex digits (position " + str(i + 1) + ")") }
+      out.push(hi * 16 + lo)
+      i = i + 3
+    } else {
+      if ord(ch) >= 128 { fail("a raw non-ASCII byte is not allowed in a percent-encoded string (position " + str(i + 1) + ")") }
+      out.push(ord(ch))
+      i = i + 1
+    }
+  }
+  return out
+}
+
+# --- commands ----------------------------------------------------------------
+
+fn do_encode(fmt, bytes) {
+  if fmt == "base64" { return b64_encode(bytes, B64) }
+  if fmt == "base64url" { return b64_encode(bytes, B64URL) }
+  if fmt == "base32" { return b32_encode(bytes) }
+  if fmt == "hex" { return hex_encode(bytes) }
+  if fmt == "url" { return url_encode(bytes) }
+  fail("unknown format '" + fmt + "'; use base64, base64url, base32, hex or url")
+}
+
+fn do_decode(fmt, text) {
+  if fmt == "base64" { return b64_decode(text, B64) }
+  if fmt == "base64url" { return b64_decode(text, B64URL) }
+  if fmt == "base32" { return b32_decode(text) }
+  if fmt == "hex" { return hex_decode(text) }
+  if fmt == "url" { return url_decode(text) }
+  fail("unknown format '" + fmt + "'; use base64, base64url, base32, hex or url")
+}
+
+fn get_input(a, idx) {
+  let file = argmod.flag(a, "file", false)
+  let bytes = nil
+  if file { bytes = bytes_of_file(str(file)) }
+  else {
+    if len(a["positional"]) < idx + 1 { fail("give the text as an argument, or use --file=PATH") }
+    bytes = bytes_of_text(str(a["positional"][idx]))
+  }
+  if len(bytes) > MAX_BYTES { fail("at most " + str(MAX_BYTES) + " bytes are supported, got " + str(len(bytes))) }
+  return bytes
+}
+
+fn need_format(a) {
+  if len(a["positional"]) < 1 { fail("usage: encode|decode FORMAT TEXT (formats: base64 base64url base32 hex url)") }
+  return str(a["positional"][0])
+}
+
+fn cmd_encode(a) {
+  let fmt = need_format(a)
+  print(do_encode(fmt, get_input(a, 1)))
+}
+
+fn cmd_decode(a) {
+  let fmt = need_format(a)
+  let text = text_of_bytes(get_input(a, 1))
+  let out = do_decode(fmt, text)
+  print(text_of_bytes(out))
+}
+
+fn cmd_batch(a) {
+  if len(a["positional"]) < 1 { fail("usage: batch FILE (lines like: encode base64 hello)") }
+  let path = str(a["positional"][0])
+  let body = nil
+  try { body = read_file(path) } catch e { fail("cannot read '" + path + "'") }
+  let n = 0
+  for line in body.split("\n") {
+    if len(line) == 0 or line[0] == "#" { continue }
+    n = n + 1
+    # "encode FORMAT TEXT" or "decode FORMAT TEXT": the text is everything after the second space
+    let p1 = line.find(" ", 0)
+    let p2 = p1 < 0 ? -1 : line.find(" ", p1 + 1)
+    let out = nil
+    CATCH[0] = true
+    try {
+      if p1 < 0 or p2 < 0 { fail("bad line") }
+      let cmd = line[0:p1]
+      let fmt = line[p1 + 1:p2]
+      let rest = line[p2 + 1:len(line)]
+      if cmd == "encode" { out = do_encode(fmt, bytes_of_text(rest)) }
+      else if cmd == "decode" { out = hex_encode(do_decode(fmt, rest)) }
+      else { fail("bad command") }
+    } catch e { out = "error" }
+    CATCH[0] = false
+    print(str(n) + " " + out)
+  }
+}
+
+let app = cli.new("encode", "Base64, Base32, hex and URL encoding, in Larzscript")
+cli.command(app, "encode", "encode: encode FORMAT TEXT [--file=PATH]", fn(a) { cmd_encode(a) })
+cli.command(app, "decode", "decode: decode FORMAT TEXT [--file=PATH]", fn(a) { cmd_decode(a) })
+cli.command(app, "batch", "many lines (decoded results are shown as hex): batch FILE", fn(a) { cmd_batch(a) })
+
+cli.run(app, args)
